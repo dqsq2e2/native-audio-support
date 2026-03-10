@@ -1,29 +1,19 @@
 {
-  "id": "native-audio-support",
-  "name": "Native Audio Support",
-  "version": "0.1.2",
-  "plugin_type": "format",
-  "type": "format",
-  "author": "Ting Reader Team",
-  "description": "Provides native audio format support (metadata extraction and streaming) via FFmpeg",
-  "supported_extensions": [
-    "m4a",
-    "mp4",
-    "wma",
-    "flac",
-    "ape",
-    "wav",
-    "ogg",
-    "opus",
-    "aac"
-  ],
-  "entry_point": "native_audio_support.dll",
-  "config_schema": {
-    "ffmpeg_path": {
-      "type": "string",
-      "title": "FFmpeg Path",
-      "description": "Path to ffmpeg executable (optional, auto-detects bundled or system PATH)",
-      "default": ""
+    "id": "native-audio-support",
+    "name": "Native Audio Support",
+    "version": "0.1.1",
+    "plugin_type": "format",
+    "type": "format",
+    "author": "Ting Reader Team",
+    "description": "Provides native audio format support (metadata extraction and streaming) via FFmpeg",
+    "supported_extensions": ["m4a", "mp4", "wma", "flac", "ape", "wav", "ogg", "opus", "aac"],
+    "entry_point": "native_audio_support.dll",
+    "config_schema": {
+        "ffmpeg_path": {
+            "type": "string",
+            "title": "FFmpeg Path",
+            "description": "Path to ffmpeg executable (optional, auto-detects bundled or system PATH)",
+            "default": ""
+        }
     }
-  }
 }

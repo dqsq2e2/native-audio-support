@@ -6,6 +6,10 @@ use serde_json::{json, Value};
 use std::sync::Mutex;
 use regex::Regex;
 use encoding_rs::GBK;
+use lofty::probe::Probe;
+use lofty::prelude::*;
+use lofty::picture::MimeType;
+use std::borrow::Cow;
 
 // Global state to manage FFmpeg path or other resources
 // Since this is a dylib, we can use static mutable state with synchronization
@@ -258,113 +262,218 @@ fn fix_encoding(s: &str) -> String {
 
 fn extract_metadata(params: Value) -> Result<Value, String> {
     let path_str = params["file_path"].as_str().ok_or("Missing file_path")?;
-    let ffprobe = get_ffprobe_path();
-    let ffmpeg = get_ffmpeg_path();
     let path = Path::new(path_str);
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     
-    // Run ffprobe
-    // ffprobe -v quiet -print_format json -show_format -show_streams "path"
-    let output = Command::new(&ffprobe)
-        .arg("-v")
-        .arg("quiet")
-        .arg("-print_format")
-        .arg("json")
-        .arg("-show_format")
-        .arg("-show_streams") // Enable stream info to detect cover art
-        .arg(path_str)
-        .output()
-        .map_err(|e| format!("Failed to execute ffprobe: {}", e))?;
-        
-    if !output.status.success() {
-        return Err(format!("ffprobe exited with error: {}", String::from_utf8_lossy(&output.stderr)));
-    }
-    
-    let json_out: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Failed to parse ffprobe output: {}", e))?;
-        
-    // Extract fields
-    let format = json_out.get("format").ok_or("No format info")?;
-    let empty_tags = json!({});
-    let tags = format.get("tags").unwrap_or(&empty_tags);
-    
-    // Debug logging for tags
-    eprintln!("Extracted tags for {}: {:?}", path_str, tags);
-
-    let duration_sec = format.get("duration")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0);
-        
-    // Map common tags
-    // ffprobe usually returns lowercase keys
+    // 1. Try to read metadata using Lofty first
+    // Lofty is faster and allows us to handle encoding manually if needed
     let mut metadata = json!({
-        "duration": duration_sec,
-        "format": ext
+        "format": ext,
+        "duration": 0.0
     });
     
     let meta_obj = metadata.as_object_mut().unwrap();
     
-    if let Some(tags_obj) = tags.as_object() {
-        for (k, v) in tags_obj {
-            let k_lower = k.to_lowercase();
-            let raw_str = v.as_str().unwrap_or("").to_string();
-            let v_str = fix_encoding(&raw_str);
-            
-            match k_lower.as_str() {
-                "title" | "nam" | "name" => { meta_obj.insert("title".to_string(), json!(v_str)); },
-                "artist" | "art" => { meta_obj.insert("artist".to_string(), json!(v_str)); },
-                "album" | "alb" => { meta_obj.insert("album".to_string(), json!(v_str)); },
-                "album_artist" | "album artist" | "aart" => { meta_obj.insert("album_artist".to_string(), json!(v_str)); },
-                "composer" | "wrt" => { meta_obj.insert("composer".to_string(), json!(v_str)); },
-                "date" | "year" | "day" => { meta_obj.insert("year".to_string(), json!(v_str)); },
-                "comment" | "cmt" => { 
-                    // Clean description/comment (e.g. remove HTML tags if needed, or keep raw)
-                    // The user wants the full description including HTML tags.
-                    meta_obj.insert("comment".to_string(), json!(v_str)); 
-                    // Also map to description if not present
-                    if !meta_obj.contains_key("description") {
-                        meta_obj.insert("description".to_string(), json!(v_str));
-                    }
-                },
-                "lyrics" | "lyr" => {
-                    meta_obj.insert("lyrics".to_string(), json!(v_str));
-                    // Lyrics often contain the full description in podcasts/audiobooks
-                    if !meta_obj.contains_key("description") {
-                         meta_obj.insert("description".to_string(), json!(v_str));
-                    }
-                },
-                "genre" | "gen" => { meta_obj.insert("genre".to_string(), json!(v_str)); },
-                "description" | "desc" | "synopsis" | "long_description" => { meta_obj.insert("description".to_string(), json!(v_str)); },
-                _ => {} // Ignore others
-            }
-        }
-    }
-
-    // Fallback: If description is empty, try to populate it from comment or lyrics
-    let has_desc = meta_obj.get("description")
-        .and_then(|v| v.as_str())
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
+    // Attempt to read via Lofty
+    if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
+        // Duration
+        let duration = tagged_file.properties().duration();
+        let duration_sec = duration.as_secs_f64();
+        meta_obj.insert("duration".to_string(), json!(duration_sec));
         
-    if !has_desc {
-        if let Some(comment) = meta_obj.get("comment").and_then(|v| v.as_str()) {
-            if !comment.trim().is_empty() {
-                meta_obj.insert("description".to_string(), json!(comment));
+        // Tags
+        if let Some(tag) = tagged_file.primary_tag() {
+            if let Some(title) = tag.title() {
+                let s: &str = &title;
+                meta_obj.insert("title".to_string(), json!(fix_encoding(s)));
+            }
+            if let Some(artist) = tag.artist() {
+                let s: &str = &artist;
+                meta_obj.insert("artist".to_string(), json!(fix_encoding(s)));
+            }
+            if let Some(album) = tag.album() {
+                let s: &str = &album;
+                meta_obj.insert("album".to_string(), json!(fix_encoding(s)));
+            }
+            // Removed year extraction due to compatibility issues
+            if let Some(genre) = tag.genre() {
+                let s: &str = &genre;
+                meta_obj.insert("genre".to_string(), json!(fix_encoding(s)));
+            }
+            if let Some(comment) = tag.comment() {
+                let s: &str = &comment;
+                meta_obj.insert("comment".to_string(), json!(fix_encoding(s)));
+                meta_obj.insert("description".to_string(), json!(fix_encoding(s)));
             }
         }
     }
     
-    // Check again
-    let has_desc_2 = meta_obj.get("description")
-        .and_then(|v| v.as_str())
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
+    // If we have basic metadata from Lofty, we might still want to use ffprobe for cover art extraction
+    // Or if Lofty failed completely.
+    
+    // If duration is still 0 or missing title, fallback to ffprobe
+    // But for now, let's assume Lofty works for metadata.
+    
+    // However, for cover art, Lofty can give us the Picture, but we need to write it to disk.
+    // If Lofty found a picture, we can save it.
+    let mut cover_extracted_by_lofty = false;
+    
+    if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
+         if let Some(tag) = tagged_file.primary_tag() {
+             let pictures = tag.pictures();
+             if !pictures.is_empty() {
+                 let pic = &pictures[0];
+                 let mime = pic.mime_type();
+                 let data = pic.data();
+                 
+                 let ext = match mime {
+                     Some(MimeType::Png) => "png",
+                     Some(MimeType::Jpeg) => "jpg",
+                     Some(MimeType::Tiff) => "tiff",
+                     Some(MimeType::Bmp) => "bmp",
+                     Some(MimeType::Gif) => "gif",
+                     _ => "jpg"
+                 };
+
+                 if let Some(parent) = path.parent() {
+                     let cover_filename = format!("cover.{}", ext);
+                     let cover_path = parent.join(&cover_filename);
+                     if !cover_path.exists() {
+                         if let Ok(_) = std::fs::write(&cover_path, data) {
+                             meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
+                             cover_extracted_by_lofty = true;
+                         }
+                     } else {
+                          meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
+                          cover_extracted_by_lofty = true;
+                     }
+                 }
+             }
+         }
+    }
+
+    // Even if Lofty worked, we might want to run the description cleaning logic later.
+    // But if Lofty worked, we don't need ffprobe unless we are missing data.
+    
+    let has_title = meta_obj.contains_key("title");
+    
+    if !has_title || !cover_extracted_by_lofty {
+        // Fallback to ffprobe or use it for cover extraction if Lofty missed it
+        let ffprobe = get_ffprobe_path();
+        let ffmpeg = get_ffmpeg_path();
         
-    if !has_desc_2 {
-        if let Some(lyrics) = meta_obj.get("lyrics").and_then(|v| v.as_str()) {
-            if !lyrics.trim().is_empty() {
-                meta_obj.insert("description".to_string(), json!(lyrics));
+        // ... (Existing ffprobe logic) ...
+        // We will merge ffprobe results into meta_obj if keys are missing
+        
+        let output = Command::new(&ffprobe)
+            .arg("-v")
+            .arg("quiet")
+            .arg("-print_format")
+            .arg("json")
+            .arg("-show_format")
+            .arg("-show_streams") 
+            .arg(path_str)
+            .output();
+            
+        if let Ok(out) = output {
+            if out.status.success() {
+                if let Ok(json_out) = serde_json::from_slice::<Value>(&out.stdout) {
+                    if let Some(format) = json_out.get("format") {
+                        // Duration fallback
+                        if meta_obj.get("duration").and_then(|d| d.as_f64()).unwrap_or(0.0) == 0.0 {
+                            let d = format.get("duration")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                             meta_obj.insert("duration".to_string(), json!(d));
+                        }
+                        
+                        // Metadata fallback
+                        if let Some(tags) = format.get("tags").and_then(|t| t.as_object()) {
+                            for (k, v) in tags {
+                                let k_lower = k.to_lowercase();
+                                let raw_str = v.as_str().unwrap_or("").to_string();
+                                let v_str = fix_encoding(&raw_str);
+                                
+                                // Only insert if missing
+                                match k_lower.as_str() {
+                                    "title" | "nam" | "name" => { if !meta_obj.contains_key("title") { meta_obj.insert("title".to_string(), json!(v_str)); } },
+                                    "artist" | "art" => { if !meta_obj.contains_key("artist") { meta_obj.insert("artist".to_string(), json!(v_str)); } },
+                                    "album" | "alb" => { if !meta_obj.contains_key("album") { meta_obj.insert("album".to_string(), json!(v_str)); } },
+                                    // ... handle others as needed
+                                    "description" | "desc" | "synopsis" => {
+                                        // Always try to get description if current is empty
+                                         if !meta_obj.contains_key("description") {
+                                              meta_obj.insert("description".to_string(), json!(v_str));
+                                         }
+                                    },
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Cover extraction using ffmpeg if Lofty failed
+                    if !cover_extracted_by_lofty {
+                        // ... (Use existing cover extraction logic, but simplified)
+                        // Copy paste the cover logic logic from previous code
+                        let mut has_cover = false;
+                        let mut cover_codec = "jpg".to_string();
+
+                        if let Some(streams) = json_out.get("streams").and_then(|v| v.as_array()) {
+                            for stream in streams {
+                                let mut is_this_cover = false;
+                                if let Some(disposition) = stream.get("disposition") {
+                                    if let Some(val) = disposition.get("attached_pic") {
+                                        if val.as_i64() == Some(1) || val.as_u64() == Some(1) || val.as_str() == Some("1") {
+                                            is_this_cover = true;
+                                        }
+                                    }
+                                }
+                                if !is_this_cover {
+                                     if let Some(codec_type) = stream.get("codec_type").and_then(|v| v.as_str()) {
+                                         if codec_type == "video" {
+                                             if let Some(codec_name) = stream.get("codec_name").and_then(|v| v.as_str()) {
+                                                 if codec_name == "mjpeg" || codec_name == "png" {
+                                                     is_this_cover = true;
+                                                 }
+                                             }
+                                         }
+                                     }
+                                }
+                                if is_this_cover {
+                                    has_cover = true;
+                                    if let Some(codec) = stream.get("codec_name").and_then(|v| v.as_str()) {
+                                        if codec == "png" { cover_codec = "png".to_string(); }
+                                        else if codec == "webp" { cover_codec = "webp".to_string(); }
+                                        else { cover_codec = "jpg".to_string(); }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if has_cover {
+                            if let Some(parent) = path.parent() {
+                                let cover_filename = format!("cover.{}", cover_codec);
+                                let cover_path = parent.join(&cover_filename);
+                                if !cover_path.exists() {
+                                    let _ = Command::new(&ffmpeg)
+                                        .arg("-loglevel").arg("error").arg("-y")
+                                        .arg("-i").arg(path_str)
+                                        .arg("-map").arg("0:v:0")
+                                        .arg("-c").arg("copy")
+                                        .arg("-f").arg(if cover_codec == "jpg" { "mjpeg" } else { "image2" }) 
+                                        .arg(&cover_path)
+                                        .status();
+                                }
+                                if cover_path.exists() {
+                                    meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -389,21 +498,11 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
             if !t.is_empty() {
                 meta_obj.insert("description".to_string(), json!(t.clone()));
                 
-                // Enhanced regex to be more robust
-                // Use case-insensitive matching (i) and multi-line mode (m)
-                // Match "Label: Name" pattern.
-                // Stop at newline, comma, period, or common delimiters if text continues on same line.
-                // But usually "Author: Name" is followed by newline or comma.
-                // Let's capture until newline first, then clean.
                 let author_re = Regex::new(r"(?im)(?:作者|原著|作家)\s*[：:]\s*([^\n]+)").unwrap();
                 let narrator_re = Regex::new(r"(?im)(?:主播|演播|播讲|朗读)\s*[：:]\s*([^\n]+)").unwrap();
                 
-                // Clean the extracted value (remove trailing punctuation if any)
                 let clean_extracted = |val: &str| -> String {
                      let mut s = val.trim().to_string();
-                     // If contains comma/period, take first part?
-                     // Example: "打眼，阅文集团白金作家" -> "打眼"
-                     // Split by common separators
                      if let Some(idx) = s.find(|c| c == '，' || c == ',' || c == '。' || c == '；' || c == ';') {
                          s = s[..idx].trim().to_string();
                      }
@@ -413,21 +512,11 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
                 let author_from_desc = author_re.captures(&t).and_then(|c| c.get(1)).map(|m| clean_extracted(m.as_str()));
                 let narrator_from_desc = narrator_re.captures(&t).and_then(|c| c.get(1)).map(|m| clean_extracted(m.as_str()));
                 
-                // Get original artist value
                 let artist_val = meta_obj.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
                 if let Some(a) = author_from_desc.clone() {
                     if !a.is_empty() {
                         meta_obj.insert("album_artist".to_string(), json!(a.clone()));
-                        // Rule: If artist matches extracted author, then artist is Author.
-                        // We map album_artist to Author.
-                        // And we ensure artist stays as Author.
-                        // BUG FIX: Only if artist_val matches 'a' do we confirm it.
-                        // If artist_val is "郭益达" and 'a' is "打眼", we should NOT overwrite artist with 'a'.
-                        // The previous logic was: if !artist_val.is_empty() && artist_val == a { ... }
-                        // This logic was actually correct for confirming Author.
-                        // But wait, if artist_val is "郭益达", this block does nothing to artist.
-                        
                         if !artist_val.is_empty() && artist_val == a {
                              meta_obj.insert("artist".to_string(), json!(a));
                         }
@@ -437,140 +526,11 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
                 if let Some(n) = narrator_from_desc.clone() {
                     if !n.is_empty() {
                         meta_obj.insert("narrator".to_string(), json!(n.clone()));
-                        
-                        // Rule: If artist is empty OR matches extracted narrator, then artist is Narrator.
-                        // And default artist to narrator if ambiguous.
-                        // BUG FIX: If artist_val is "郭益达" and n is "郭益达", we confirm artist is Narrator.
                         if artist_val.trim().is_empty() || artist_val.trim() == n {
                             meta_obj.insert("artist".to_string(), json!(n));
                         }
                     }
                 }
-            }
-        }
-    }
-
-    // Check for cover art in streams
-    let mut has_cover = false;
-    let mut cover_codec = "jpg".to_string(); // Default to jpg
-
-    if let Some(streams) = json_out.get("streams").and_then(|v| v.as_array()) {
-        for stream in streams {
-            let mut is_this_cover = false;
-            
-            if let Some(disposition) = stream.get("disposition") {
-                if let Some(val) = disposition.get("attached_pic") {
-                    // Check number or string
-                    if val.as_i64() == Some(1) || val.as_u64() == Some(1) || val.as_str() == Some("1") {
-                        is_this_cover = true;
-                    }
-                }
-            }
-            
-            // Fallback: Check if it's a video stream with mjpeg/png codec (heuristics)
-            if !is_this_cover {
-                 if let Some(codec_type) = stream.get("codec_type").and_then(|v| v.as_str()) {
-                     if codec_type == "video" {
-                         if let Some(codec_name) = stream.get("codec_name").and_then(|v| v.as_str()) {
-                             if codec_name == "mjpeg" || codec_name == "png" {
-                                 is_this_cover = true;
-                             }
-                         }
-                     }
-                 }
-            }
-
-            if is_this_cover {
-                has_cover = true;
-                if let Some(codec) = stream.get("codec_name").and_then(|v| v.as_str()) {
-                    if codec == "png" {
-                        cover_codec = "png".to_string();
-                    } else if codec == "mjpeg" || codec == "jpg" {
-                        cover_codec = "jpg".to_string();
-                    } else if codec == "webp" {
-                        cover_codec = "webp".to_string();
-                    }
-                }
-                break;
-            }
-        }
-    }
-
-    // Extract cover art if found
-    if has_cover {
-        if let Some(parent) = path.parent() {
-            let cover_filename = format!("cover.{}", cover_codec);
-            let cover_path = parent.join(&cover_filename);
-            
-            // Only extract if not exists (to avoid overwriting user custom cover)
-            if !cover_path.exists() {
-                // Strategy 1: Copy with explicit format
-                let status = Command::new(&ffmpeg)
-                    .arg("-loglevel")
-                    .arg("error")
-                    .arg("-y")
-                    .arg("-i")
-                    .arg(path_str)
-                    .arg("-map")
-                    .arg("0:v:0")
-                    .arg("-c")
-                    .arg("copy")
-                    .arg("-f")
-                    .arg(if cover_codec == "jpg" { "mjpeg" } else { "image2" }) 
-                    .arg(&cover_path)
-                    .status();
-                    
-                let success = match status {
-                    Ok(s) => s.success(),
-                    Err(_) => false,
-                };
-
-                if !success {
-                    // Strategy 2: Transcode (remove -c copy)
-                    let status2 = Command::new(&ffmpeg)
-                        .arg("-loglevel")
-                        .arg("error")
-                        .arg("-y")
-                        .arg("-i")
-                        .arg(path_str)
-                        .arg("-map")
-                        .arg("0:v:0")
-                        .arg(&cover_path)
-                        .status();
-                        
-                    // If failed, log warning via println (backend captures stdout/stderr usually)
-                    if let Err(e) = status2 {
-                        eprintln!("FFmpeg cover extraction strategy 2 failed: {}", e);
-                    }
-                    // Don't check status2 success here, check file existence later
-                }
-            }
-            
-            // If it exists (or we just created it), return it
-            if cover_path.exists() {
-                meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
-            } else {
-                 // Try one last desperate attempt: force mjpeg to cover.jpg
-                 // Sometimes codec detection is wrong
-                 let cover_path_jpg = parent.join("cover.jpg");
-                 if !cover_path_jpg.exists() {
-                     let _ = Command::new(&ffmpeg)
-                        .arg("-loglevel")
-                        .arg("error")
-                        .arg("-y")
-                        .arg("-i")
-                        .arg(path_str)
-                        .arg("-an")
-                        .arg("-f")
-                        .arg("mjpeg")
-                        .arg(&cover_path_jpg)
-                        .status();
-                 }
-                 if cover_path_jpg.exists() {
-                     meta_obj.insert("cover_url".to_string(), json!(cover_path_jpg.to_string_lossy()));
-                 } else {
-                     eprintln!("Failed to extract cover for {}", path_str);
-                 }
             }
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "native-audio-support"
-version = "0.1.2"
+version = "0.1.1"
 edition = "2021"
 
 [lib]
@@ -14,4 +14,5 @@ regex = "1.10"
 walkdir = "2.4"
 lazy_static = "1.4"
 encoding_rs = "0.8.35"
+lofty = "0.23.2"
 # Using standard process command to invoke ffmpeg
