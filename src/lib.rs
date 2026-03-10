@@ -5,6 +5,7 @@ use std::process::Command;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use regex::Regex;
+use encoding_rs::GBK;
 
 // Global state to manage FFmpeg path or other resources
 // Since this is a dylib, we can use static mutable state with synchronization
@@ -232,6 +233,29 @@ fn detect(params: Value) -> Result<Value, String> {
     Ok(json!({ "is_supported": is_supported }))
 }
 
+fn fix_encoding(s: &str) -> String {
+    // Check if the string contains only Latin-1 characters
+    let bytes: Vec<u8> = s.chars()
+        .map(|c| c as u32)
+        .filter(|&c| c <= 255)
+        .map(|c| c as u8)
+        .collect();
+    
+    // If length differs, it contains non-Latin-1 chars, so likely UTF-8
+    if bytes.len() != s.chars().count() {
+        return s.to_string();
+    }
+    
+    // Try to decode as GBK
+    // If it decodes without errors, use it
+    let (cow, _, had_errors) = GBK.decode(&bytes);
+    if !had_errors {
+        return cow.into_owned();
+    }
+    
+    s.to_string()
+}
+
 fn extract_metadata(params: Value) -> Result<Value, String> {
     let path_str = params["file_path"].as_str().ok_or("Missing file_path")?;
     let ffprobe = get_ffprobe_path();
@@ -284,7 +308,8 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
     if let Some(tags_obj) = tags.as_object() {
         for (k, v) in tags_obj {
             let k_lower = k.to_lowercase();
-            let v_str = v.as_str().unwrap_or("").to_string();
+            let raw_str = v.as_str().unwrap_or("").to_string();
+            let v_str = fix_encoding(&raw_str);
             
             match k_lower.as_str() {
                 "title" | "nam" | "name" => { meta_obj.insert("title".to_string(), json!(v_str)); },
