@@ -1,6 +1,6 @@
 [package]
 name = "native-audio-support"
-version = "0.1.4"
+version = "1.0.0"
 edition = "2021"
 
 [lib]
