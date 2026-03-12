@@ -3,7 +3,7 @@ use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use serde_json::{json, Value};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use regex::Regex;
 use encoding_rs::GBK;
 use lofty::probe::Probe;
@@ -15,6 +15,7 @@ use std::borrow::Cow;
 // Since this is a dylib, we can use static mutable state with synchronization
 lazy_static::lazy_static! {
     static ref FFMPEG_PATH: Mutex<Option<String>> = Mutex::new(None);
+    static ref PLUGIN_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
 }
 
 // We need lazy_static dependency, let's add it to Cargo.toml or use std::sync::OnceLock (Rust 1.70+)
@@ -38,12 +39,14 @@ pub unsafe extern "C" fn plugin_invoke(
         Err(_) => return -1,
     };
 
+    // Parse params immediately to handle initialize
     let params_json: Value = match serde_json::from_str(params_str) {
         Ok(v) => v,
         Err(_) => return -1,
     };
 
     let result = match method_str {
+        "initialize" => initialize(params_json),
         "detect" => detect(params_json),
         "extract_metadata" => extract_metadata(params_json),
         "get_stream_url" => get_stream_url(params_json),
@@ -85,10 +88,52 @@ pub unsafe extern "C" fn plugin_free(ptr: *mut u8) {
 
 // --- Implementation ---
 
+fn initialize(params: Value) -> Result<Value, String> {
+    if let Some(plugin_path_str) = params.get("plugin_path").and_then(|v| v.as_str()) {
+        let path = PathBuf::from(plugin_path_str);
+        if let Ok(mut lock) = PLUGIN_DIR.write() {
+            *lock = Some(path);
+        }
+    }
+    Ok(json!({ "status": "initialized" }))
+}
+
 fn get_ffmpeg_path() -> String {
     let ffmpeg = FFMPEG_PATH.lock().unwrap();
     if let Some(path) = &*ffmpeg {
         return path.clone();
+    }
+    
+    // Check PLUGIN_DIR first
+    let exe_ext = std::env::consts::EXE_EXTENSION;
+    if let Ok(lock) = PLUGIN_DIR.read() {
+        if let Some(plugin_path) = lock.as_ref() {
+            // Check if ffmpeg is inside this plugin directory (unlikely but possible)
+            let mut bin_path = plugin_path.join("ffmpeg");
+            if !exe_ext.is_empty() { bin_path.set_extension(exe_ext); }
+            if bin_path.exists() { return bin_path.to_string_lossy().to_string(); }
+
+            // Check sibling ffmpeg-utils
+            if let Some(plugins_dir) = plugin_path.parent() {
+                if let Ok(entries) = std::fs::read_dir(plugins_dir) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if dir_name.starts_with("FFmpeg Provider") || dir_name.starts_with("ffmpeg-utils") {
+                                let mut bin_path = path.join("ffmpeg");
+                                if !exe_ext.is_empty() { bin_path.set_extension(exe_ext); }
+                                if bin_path.exists() { return bin_path.to_string_lossy().to_string(); }
+
+                                let mut bin_sub_path = path.join("bin").join("ffmpeg");
+                                if !exe_ext.is_empty() { bin_sub_path.set_extension(exe_ext); }
+                                if bin_sub_path.exists() { return bin_sub_path.to_string_lossy().to_string(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     
     let mut search_paths = Vec::new();
@@ -154,6 +199,38 @@ fn get_ffmpeg_path() -> String {
 }
 
 fn get_ffprobe_path() -> String {
+    // Check PLUGIN_DIR first
+    let exe_ext = std::env::consts::EXE_EXTENSION;
+    if let Ok(lock) = PLUGIN_DIR.read() {
+        if let Some(plugin_path) = lock.as_ref() {
+            // Check if ffprobe is inside this plugin directory
+            let mut bin_path = plugin_path.join("ffprobe");
+            if !exe_ext.is_empty() { bin_path.set_extension(exe_ext); }
+            if bin_path.exists() { return bin_path.to_string_lossy().to_string(); }
+
+            // Check sibling ffmpeg-utils
+            if let Some(plugins_dir) = plugin_path.parent() {
+                if let Ok(entries) = std::fs::read_dir(plugins_dir) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if dir_name.starts_with("FFmpeg Provider") || dir_name.starts_with("ffmpeg-utils") {
+                                let mut bin_path = path.join("ffprobe");
+                                if !exe_ext.is_empty() { bin_path.set_extension(exe_ext); }
+                                if bin_path.exists() { return bin_path.to_string_lossy().to_string(); }
+
+                                let mut bin_sub_path = path.join("bin").join("ffprobe");
+                                if !exe_ext.is_empty() { bin_sub_path.set_extension(exe_ext); }
+                                if bin_sub_path.exists() { return bin_sub_path.to_string_lossy().to_string(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut search_paths = Vec::new();
 
     // 1. Check relative to Executable
