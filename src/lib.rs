@@ -150,7 +150,7 @@ fn get_ffmpeg_path() -> String {
     }
 
     // Default to system PATH
-    "ffmpeg".to_string()
+    "".to_string()
 }
 
 fn get_ffprobe_path() -> String {
@@ -209,7 +209,7 @@ fn get_ffprobe_path() -> String {
         return local_path.to_string_lossy().to_string();
     }
 
-    "ffprobe".to_string()
+    "".to_string()
 }
 
 fn configure(params: Value) -> Result<Value, String> {
@@ -360,12 +360,14 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
     if !has_title || !cover_extracted_by_lofty {
         // Fallback to ffprobe or use it for cover extraction if Lofty missed it
         let ffprobe = get_ffprobe_path();
-        let ffmpeg = get_ffmpeg_path();
         
-        // ... (Existing ffprobe logic) ...
-        // We will merge ffprobe results into meta_obj if keys are missing
-        
-        let output = Command::new(&ffprobe)
+        if !ffprobe.is_empty() {
+            let ffmpeg = get_ffmpeg_path();
+            
+            // ... (Existing ffprobe logic) ...
+            // We will merge ffprobe results into meta_obj if keys are missing
+            
+            let output = Command::new(&ffprobe)
             .arg("-v")
             .arg("quiet")
             .arg("-print_format")
@@ -477,9 +479,11 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
             }
         }
     }
+    }
 
     // Description cleaning and author/narrator extraction from description text
     if let Some(desc_val) = meta_obj.get("description").and_then(|v| v.as_str()) {
+        // ... (existing logic)
         let raw = desc_val.to_string();
         if !raw.trim().is_empty() {
             let mut t = raw.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n");
@@ -561,6 +565,9 @@ fn get_stream_url(params: Value) -> Result<Value, String> {
     
     let path_str = params["file_path"].as_str().ok_or("Missing file_path")?;
     let ffmpeg = get_ffmpeg_path();
+    if ffmpeg.is_empty() {
+        return Err("FFmpeg not found in plugin directory".to_string());
+    }
     
     // We construct a command that outputs MP3 data to stdout
     let command = vec![
