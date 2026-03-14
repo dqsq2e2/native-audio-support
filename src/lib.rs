@@ -9,7 +9,7 @@ use encoding_rs::GBK;
 use lofty::probe::Probe;
 use lofty::prelude::*;
 use lofty::picture::MimeType;
-use std::borrow::Cow;
+use lofty::config::{WriteOptions, ParseOptions, ParsingMode};
 
 // Global state to manage FFmpeg path or other resources
 // Since this is a dylib, we can use static mutable state with synchronization
@@ -49,6 +49,7 @@ pub unsafe extern "C" fn plugin_invoke(
         "initialize" => initialize(params_json),
         "detect" => detect(params_json),
         "extract_metadata" => extract_metadata(params_json),
+        "write_metadata" => write_metadata(params_json),
         "get_stream_url" => get_stream_url(params_json),
         "configure" => configure(params_json),
         "get_decryption_plan" => get_decryption_plan(params_json),
@@ -351,8 +352,13 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
     
     let meta_obj = metadata.as_object_mut().unwrap();
     
-    // Attempt to read via Lofty
-    if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
+    // Attempt to read via Lofty with Relaxed mode
+    let parse_options = ParseOptions::new().parsing_mode(ParsingMode::Relaxed);
+    
+    if let Ok(tagged_file) = Probe::open(path)
+         .and_then(|p| {
+              p.options(parse_options).read()
+         }) {
         // Duration
         let duration = tagged_file.properties().duration();
         let duration_sec = duration.as_secs_f64();
@@ -395,7 +401,13 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
     // If Lofty found a picture, we can save it.
     let mut cover_extracted_by_lofty = false;
     
-    if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
+    // We try to reuse the already opened tagged file if possible, but the code structure here
+    // makes it easier to just reopen.
+    let parse_options = ParseOptions::new().parsing_mode(ParsingMode::Relaxed);
+    if let Ok(tagged_file) = Probe::open(path)
+         .and_then(|p| {
+              p.options(parse_options).read()
+         }) {
          if let Some(tag) = tagged_file.primary_tag() {
              let pictures = tag.pictures();
              if !pictures.is_empty() {
@@ -641,25 +653,64 @@ fn get_stream_url(params: Value) -> Result<Value, String> {
     // ffmpeg -i input.m4a -f mp3 -
     
     let path_str = params["file_path"].as_str().ok_or("Missing file_path")?;
+    let transcode = params["transcode"].as_str().unwrap_or("mp3");
+    let seek = params["seek"].as_str().filter(|s| !s.trim().is_empty());
     let ffmpeg = get_ffmpeg_path();
     if ffmpeg.is_empty() {
         return Err("FFmpeg not found in plugin directory".to_string());
     }
     
     // We construct a command that outputs MP3 data to stdout
-    let command = vec![
+    let mut command = vec![
         ffmpeg,
-        "-i".to_string(),
-        path_str.to_string(),
-        "-f".to_string(),
-        "mp3".to_string(),
-        "-".to_string()
+        "-loglevel".to_string(),
+        "error".to_string(),
     ];
+
+    if let Some(seek_time) = seek {
+        command.push("-ss".to_string());
+        command.push(seek_time.to_string());
+    }
+
+    command.push("-i".to_string());
+    command.push(path_str.to_string());
+
+    match transcode {
+        "mp3" => {
+            command.extend([
+                "-vn".to_string(),
+                "-map".to_string(),
+                "0:a:0".to_string(),
+                "-acodec".to_string(),
+                "libmp3lame".to_string(),
+                "-b:a".to_string(),
+                "128k".to_string(),
+                "-ac".to_string(),
+                "2".to_string(),
+                "-ar".to_string(),
+                "44100".to_string(),
+                "-f".to_string(),
+                "mp3".to_string(),
+                "-".to_string(),
+            ]);
+        }
+        "wav" => {
+            command.extend([
+                "-vn".to_string(),
+                "-map".to_string(),
+                "0:a:0".to_string(),
+                "-f".to_string(),
+                "wav".to_string(),
+                "-".to_string(),
+            ]);
+        }
+        _ => return Err("Unsupported transcode format".to_string()),
+    }
     
     Ok(json!({
         "stream_type": "pipe",
         "command": command,
-        "content_type": "audio/mpeg"
+        "content_type": if transcode == "wav" { "audio/wav" } else { "audio/mpeg" }
     }))
 }
 
@@ -681,4 +732,213 @@ fn get_metadata_read_size(_params: Value) -> Result<Value, String> {
     Ok(json!({
         "size": 1024 * 1024 // 1MB
     }))
+}
+
+fn write_metadata(params: Value) -> Result<Value, String> {
+    let path_str = params["file_path"].as_str().ok_or("Missing file_path")?;
+    let path = std::path::Path::new(path_str);
+    
+    // Check if file exists
+    if !path.exists() {
+        eprintln!("[native-audio-support] File not found: {}", path_str);
+        return Err(format!("File not found: {}", path_str));
+    }
+
+    eprintln!("[native-audio-support] Writing metadata to: {}", path_str);
+    eprintln!("[native-audio-support] Params: {}", params);
+
+    // Open file with Lofty
+    // Use Relaxed parsing mode to handle malformed tags (e.g. invalid BOM)
+    let parsing_options = ParseOptions::new().parsing_mode(ParsingMode::Relaxed);
+    
+    let mut tagged_file = match Probe::open(path) {
+        Ok(p) => {
+             match p.options(parsing_options).read() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[native-audio-support] Failed to read file tags with Relaxed mode: {}", e);
+                    
+                    // Fallback: Try reading without tags if parsing failed completely
+                    eprintln!("[native-audio-support] Attempting to read without tags...");
+                    let p_fallback = Probe::open(path).map_err(|e| format!("Failed to reopen file: {}", e))?;
+                    match p_fallback.options(ParseOptions::new().read_tags(false).parsing_mode(ParsingMode::Relaxed)).read() {
+                        Ok(t) => {
+                            eprintln!("[native-audio-support] Successfully read file structure (tags ignored/cleared)");
+                            t
+                        },
+                        Err(e2) => return Err(format!("Failed to read file (even without tags): {}", e2)),
+                    }
+                }
+             }
+        },
+        Err(e) => {
+            eprintln!("[native-audio-support] Failed to open file: {}", e);
+            return Err(format!("Failed to open file: {}", e));
+        }
+    };
+
+    // Get primary tag or create one
+    let tag_type = match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str() {
+        "wav" | "aiff" => lofty::tag::TagType::Id3v2,
+        "flac" | "ogg" | "opus" => lofty::tag::TagType::VorbisComments,
+        "m4a" | "mp4" | "m4b" => lofty::tag::TagType::Mp4Ilst,
+        "ape" => lofty::tag::TagType::Ape,
+        _ => lofty::tag::TagType::Id3v2,
+    };
+
+    // Ensure we have a tag of the correct type
+    if tagged_file.tag(tag_type).is_none() {
+        eprintln!("[native-audio-support] Creating new tag of type: {:?}", tag_type);
+        tagged_file.insert_tag(lofty::tag::Tag::new(tag_type));
+    }
+
+    let tag = tagged_file.tag_mut(tag_type).ok_or("Failed to get tag")?;
+
+    // Update Text Fields
+    // NOTE: To fix potential UTF-16 BOM issues when converting ID3v2.4 (UTF-8) to ID3v2.3 (UTF-16),
+    // we explicitly remove the old frames before setting new ones. This forces Lofty to re-encode the text.
+    if let Some(title) = params.get("title").and_then(|v| v.as_str()) {
+        eprintln!("[native-audio-support] Setting title: {}", title);
+        tag.remove_title();
+        tag.set_title(title.to_string());
+    }
+    if let Some(artist) = params.get("artist").and_then(|v| v.as_str()) {
+        eprintln!("[native-audio-support] Setting artist: {}", artist);
+        tag.remove_artist();
+        tag.set_artist(artist.to_string());
+    }
+    if let Some(album) = params.get("album").and_then(|v| v.as_str()) {
+        eprintln!("[native-audio-support] Setting album: {}", album);
+        tag.remove_album();
+        tag.set_album(album.to_string());
+    }
+    if let Some(genre) = params.get("genre").and_then(|v| v.as_str()) {
+        eprintln!("[native-audio-support] Setting genre: {}", genre);
+        tag.remove_genre();
+        tag.set_genre(genre.to_string());
+    }
+    // Handle description/comment
+    if let Some(description) = params.get("description").and_then(|v| v.as_str()) {
+        eprintln!("[native-audio-support] Setting comment/description");
+        tag.remove_comment();
+        tag.set_comment(description.to_string());
+    }
+
+    // Update Cover Art
+    if let Some(cover_path_str) = params.get("cover_path").and_then(|v| v.as_str()) {
+        eprintln!("[native-audio-support] Processing cover: {}", cover_path_str);
+        let cover_path = std::path::Path::new(cover_path_str);
+        
+        if cover_path.exists() {
+             use std::io::Read;
+             let mut file = std::fs::File::open(cover_path).map_err(|e| format!("Failed to open cover file: {}", e))?;
+             let mut data = Vec::new();
+             file.read_to_end(&mut data).map_err(|e| format!("Failed to read cover file: {}", e))?;
+             
+             let ext = cover_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+             let is_m4a = matches!(path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str(), "m4a" | "mp4" | "m4b");
+             
+             // Check if conversion is needed (WebP -> JPEG, or for M4A compliance)
+             let mut final_data = data;
+             let mut final_mime = match ext.as_str() {
+                 "png" => lofty::picture::MimeType::Png,
+                 "jpg" | "jpeg" => lofty::picture::MimeType::Jpeg,
+                 "gif" => lofty::picture::MimeType::Gif,
+                 "bmp" => lofty::picture::MimeType::Bmp,
+                 "tiff" => lofty::picture::MimeType::Tiff,
+                 _ => lofty::picture::MimeType::Unknown(format!("image/{}", ext)),
+             };
+
+             // If M4A and not JPEG/PNG, or if it is WebP, convert to JPEG
+             if (is_m4a && !matches!(final_mime, lofty::picture::MimeType::Jpeg | lofty::picture::MimeType::Png)) || ext == "webp" {
+                 eprintln!("[native-audio-support] Converting image to JPEG for compatibility");
+                 match image::load_from_memory(&final_data) {
+                     Ok(img) => {
+                         let mut jpeg_data = Vec::new();
+                         let mut cursor = std::io::Cursor::new(&mut jpeg_data);
+                         match img.write_to(&mut cursor, image::ImageOutputFormat::Jpeg(90)) {
+                             Ok(_) => {
+                                 final_data = jpeg_data;
+                                 final_mime = lofty::picture::MimeType::Jpeg;
+                                 eprintln!("[native-audio-support] Conversion successful, size: {} bytes", final_data.len());
+                             },
+                             Err(e) => eprintln!("[native-audio-support] Failed to encode JPEG: {}", e),
+                         }
+                     },
+                     Err(e) => eprintln!("[native-audio-support] Failed to decode image for conversion: {}", e),
+                 }
+             }
+
+             // Create Picture using lofty's from_reader to ensure valid metadata
+             let mut cursor = std::io::Cursor::new(&final_data);
+             match lofty::picture::Picture::from_reader(&mut cursor) {
+                 Ok(mut pic) => {
+                     pic.set_pic_type(lofty::picture::PictureType::CoverFront);
+                     
+                     // Force remove all existing pictures to ensure replacement
+                     // This handles cases where M4A/MP3 might have multiple covers or different types
+                     let _ = tag.remove_picture_type(lofty::picture::PictureType::CoverFront);
+                     let _ = tag.remove_picture_type(lofty::picture::PictureType::Other);
+                     // For good measure, try to clear pictures if possible, but the API might not expose clear() directly on Tag trait easily.
+                     // Instead, we can just push. Lofty usually appends.
+                     // If we want to replace, we must remove.
+                     // Let's remove ANY picture.
+                     for pt in [
+                         lofty::picture::PictureType::Other,
+                         lofty::picture::PictureType::Icon,
+                         lofty::picture::PictureType::OtherIcon,
+                         lofty::picture::PictureType::CoverFront,
+                         lofty::picture::PictureType::CoverBack,
+                         lofty::picture::PictureType::Leaflet,
+                         lofty::picture::PictureType::Media,
+                         lofty::picture::PictureType::LeadArtist,
+                         lofty::picture::PictureType::Artist,
+                         lofty::picture::PictureType::Conductor,
+                         lofty::picture::PictureType::Band,
+                         lofty::picture::PictureType::Composer,
+                         lofty::picture::PictureType::Lyricist,
+                         lofty::picture::PictureType::RecordingLocation,
+                         lofty::picture::PictureType::DuringRecording,
+                         lofty::picture::PictureType::DuringPerformance,
+                        lofty::picture::PictureType::ScreenCapture,
+                        lofty::picture::PictureType::Illustration,
+                         lofty::picture::PictureType::BandLogo,
+                         lofty::picture::PictureType::PublisherLogo,
+                     ] {
+                         tag.remove_picture_type(pt);
+                     }
+
+                     tag.push_picture(pic);
+                     eprintln!("[native-audio-support] Cover set successfully");
+                 }
+                 Err(e) => {
+                     eprintln!("[native-audio-support] Lofty rejected the image data: {}", e);
+                     // Fallback to unchecked if from_reader fails (sometimes happens with valid jpegs)
+                     let pic = lofty::picture::Picture::unchecked(final_data)
+                         .pic_type(lofty::picture::PictureType::CoverFront)
+                         .mime_type(final_mime)
+                         .build();
+                     tag.remove_picture_type(lofty::picture::PictureType::CoverFront);
+                     tag.push_picture(pic);
+                     eprintln!("[native-audio-support] Cover set using unchecked fallback");
+                 }
+             }
+        } else {
+            eprintln!("[native-audio-support] Cover file does not exist: {}", cover_path_str);
+        }
+    }
+
+    // Save changes
+    let options = WriteOptions::default();
+    
+    match tagged_file.save_to_path(path, options) {
+        Ok(_) => {
+            eprintln!("[native-audio-support] Metadata saved successfully");
+            Ok(json!({ "status": "success" }))
+        },
+        Err(e) => {
+            eprintln!("[native-audio-support] Failed to save tags: {}", e);
+            Err(format!("Failed to save tags: {}", e))
+        },
+    }
 }
