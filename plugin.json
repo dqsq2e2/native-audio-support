@@ -8,7 +8,7 @@
         "ffmpeg-utils"
     ],
     "author": "Ting Reader Team",
-    "description": "通过 FFmpeg 提供原生音频格式支持（元数据提取与流式传输）。",
+    "description": "通过 FFmpeg 提供原生音频格式支持（元数据提取/写入与流式传输）。",
     "supported_extensions": ["m4a", "mp4", "wma", "flac", "ape", "wav", "ogg", "opus", "aac"],
     "license": "MIT",
     "homepage": "https://github.com/dqsq2e2/native-audio-support",
