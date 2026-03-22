@@ -342,6 +342,7 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
     let path_str = params["file_path"].as_str().ok_or("Missing file_path")?;
     let path = Path::new(path_str);
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let extract_cover = params.get("extract_cover").and_then(|v| v.as_bool()).unwrap_or(true);
     
     // 1. Try to read metadata using Lofty first
     // Lofty is faster and allows us to handle encoding manually if needed
@@ -403,42 +404,44 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
     
     // We try to reuse the already opened tagged file if possible, but the code structure here
     // makes it easier to just reopen.
-    let parse_options = ParseOptions::new().parsing_mode(ParsingMode::Relaxed);
-    if let Ok(tagged_file) = Probe::open(path)
-         .and_then(|p| {
-              p.options(parse_options).read()
-         }) {
-         if let Some(tag) = tagged_file.primary_tag() {
-             let pictures = tag.pictures();
-             if !pictures.is_empty() {
-                 let pic = &pictures[0];
-                 let mime = pic.mime_type();
-                 let data = pic.data();
-                 
-                 let ext = match mime {
-                     Some(MimeType::Png) => "png",
-                     Some(MimeType::Jpeg) => "jpg",
-                     Some(MimeType::Tiff) => "tiff",
-                     Some(MimeType::Bmp) => "bmp",
-                     Some(MimeType::Gif) => "gif",
-                     _ => "jpg"
-                 };
-
-                 if let Some(parent) = path.parent() {
-                     let cover_filename = format!("cover.{}", ext);
-                     let cover_path = parent.join(&cover_filename);
-                     if !cover_path.exists() {
-                         if let Ok(_) = std::fs::write(&cover_path, data) {
-                             meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
-                             cover_extracted_by_lofty = true;
+    if extract_cover {
+        let parse_options = ParseOptions::new().parsing_mode(ParsingMode::Relaxed);
+        if let Ok(tagged_file) = Probe::open(path)
+             .and_then(|p| {
+                  p.options(parse_options).read()
+             }) {
+             if let Some(tag) = tagged_file.primary_tag() {
+                 let pictures = tag.pictures();
+                 if !pictures.is_empty() {
+                     let pic = &pictures[0];
+                     let mime = pic.mime_type();
+                     let data = pic.data();
+                     
+                     let ext = match mime {
+                         Some(MimeType::Png) => "png",
+                         Some(MimeType::Jpeg) => "jpg",
+                         Some(MimeType::Tiff) => "tiff",
+                         Some(MimeType::Bmp) => "bmp",
+                         Some(MimeType::Gif) => "gif",
+                         _ => "jpg"
+                     };
+    
+                     if let Some(parent) = path.parent() {
+                         let cover_filename = format!("cover.{}", ext);
+                         let cover_path = parent.join(&cover_filename);
+                         if !cover_path.exists() {
+                             if let Ok(_) = std::fs::write(&cover_path, data) {
+                                 meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
+                                 cover_extracted_by_lofty = true;
+                             }
+                         } else {
+                              meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
+                              cover_extracted_by_lofty = true;
                          }
-                     } else {
-                          meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
-                          cover_extracted_by_lofty = true;
                      }
                  }
              }
-         }
+        }
     }
 
     // Even if Lofty worked, we might want to run the description cleaning logic later.
@@ -505,7 +508,7 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
                     }
                     
                     // Cover extraction using ffmpeg if Lofty failed
-                    if !cover_extracted_by_lofty {
+                    if extract_cover && !cover_extracted_by_lofty {
                         // ... (Use existing cover extraction logic, but simplified)
                         // Copy paste the cover logic logic from previous code
                         let mut has_cover = false;
