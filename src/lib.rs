@@ -830,7 +830,13 @@ fn write_metadata(params: Value) -> Result<Value, String> {
     // Update Cover Art
     if let Some(cover_path_str) = params.get("cover_path").and_then(|v| v.as_str()) {
         eprintln!("[native-audio-support] Processing cover: {}", cover_path_str);
-        let cover_path = std::path::Path::new(cover_path_str);
+        
+        let mut clean_cover_path_str = cover_path_str.to_string();
+        if let Some(idx) = clean_cover_path_str.find("#referer=") {
+            clean_cover_path_str = clean_cover_path_str[..idx].to_string();
+        }
+        
+        let cover_path = std::path::Path::new(&clean_cover_path_str);
         
         if cover_path.exists() {
              use std::io::Read;
