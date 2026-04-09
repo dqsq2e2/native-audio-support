@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "native-audio-support"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "encoding_rs",
  "image",
