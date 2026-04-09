@@ -427,16 +427,29 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
                      };
     
                      if let Some(parent) = path.parent() {
-                         let cover_filename = format!("cover.{}", ext);
-                         let cover_path = parent.join(&cover_filename);
-                         if !cover_path.exists() {
+                         // Check if any cover file already exists
+                         let cover_extensions = ["jpg", "jpeg", "png", "webp", "gif", "tiff", "bmp"];
+                         let mut existing_cover = None;
+                         for check_ext in &cover_extensions {
+                             let check_path = parent.join(format!("cover.{}", check_ext));
+                             if check_path.exists() {
+                                 existing_cover = Some(check_path);
+                                 break;
+                             }
+                         }
+                         
+                         if let Some(existing_path) = existing_cover {
+                             // Use existing cover
+                             meta_obj.insert("cover_url".to_string(), json!(existing_path.to_string_lossy()));
+                             cover_extracted_by_lofty = true;
+                         } else {
+                             // No existing cover, extract new one
+                             let cover_filename = format!("cover.{}", ext);
+                             let cover_path = parent.join(&cover_filename);
                              if let Ok(_) = std::fs::write(&cover_path, data) {
                                  meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
                                  cover_extracted_by_lofty = true;
                              }
-                         } else {
-                              meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
-                              cover_extracted_by_lofty = true;
                          }
                      }
                  }
@@ -549,9 +562,24 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
                         
                         if has_cover {
                             if let Some(parent) = path.parent() {
-                                let cover_filename = format!("cover.{}", cover_codec);
-                                let cover_path = parent.join(&cover_filename);
-                                if !cover_path.exists() {
+                                // Check if any cover file already exists
+                                let cover_extensions = ["jpg", "jpeg", "png", "webp", "gif", "tiff", "bmp"];
+                                let mut existing_cover = None;
+                                for check_ext in &cover_extensions {
+                                    let check_path = parent.join(format!("cover.{}", check_ext));
+                                    if check_path.exists() {
+                                        existing_cover = Some(check_path);
+                                        break;
+                                    }
+                                }
+                                
+                                if let Some(existing_path) = existing_cover {
+                                    // Use existing cover
+                                    meta_obj.insert("cover_url".to_string(), json!(existing_path.to_string_lossy()));
+                                } else {
+                                    // No existing cover, extract new one
+                                    let cover_filename = format!("cover.{}", cover_codec);
+                                    let cover_path = parent.join(&cover_filename);
                                     let _ = Command::new(&ffmpeg)
                                         .arg("-loglevel").arg("error").arg("-y")
                                         .arg("-i").arg(path_str)
@@ -560,9 +588,10 @@ fn extract_metadata(params: Value) -> Result<Value, String> {
                                         .arg("-f").arg(if cover_codec == "jpg" { "mjpeg" } else { "image2" }) 
                                         .arg(&cover_path)
                                         .status();
-                                }
-                                if cover_path.exists() {
-                                    meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
+                                    
+                                    if cover_path.exists() {
+                                        meta_obj.insert("cover_url".to_string(), json!(cover_path.to_string_lossy()));
+                                    }
                                 }
                             }
                         }
