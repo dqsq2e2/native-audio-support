@@ -1,7 +1,7 @@
 {
   "id": "native-audio-support",
   "name": "Native Audio Support",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "plugin_type": "format",
   "type": "format",
   "dependencies": [
