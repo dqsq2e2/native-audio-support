@@ -1,14 +1,12 @@
 {
   "id": "native-audio-support",
   "name": "Native Audio Support",
-  "version": "1.0.8",
+  "version": "1.0.7",
   "plugin_type": "format",
-  "type": "format",
-  "dependencies": [
-    "ffmpeg-utils"
-  ],
   "author": "Ting Reader Team",
   "description": "通过 FFmpeg 提供原生音频格式支持（元数据提取/写入与流式传输）。",
+  "description_en": "Native audio format support via FFmpeg (metadata extraction/writing and streaming).",
+  "runtime": "native",
   "supported_extensions": [
     "m4a",
     "mp4",
@@ -20,15 +18,21 @@
     "opus",
     "aac"
   ],
+  "dependencies": [
+    { "plugin_name": "ffmpeg-utils", "version_requirement": "*" }
+  ],
   "license": "MIT",
   "homepage": "https://github.com/dqsq2e2/native-audio-support",
   "entry_point": "native_audio_support.dll",
   "config_schema": {
-    "ffmpeg_path": {
-      "type": "string",
-      "title": "FFmpeg Path",
-      "description": "Path to ffmpeg executable (optional, auto-detects bundled or system PATH)",
-      "default": ""
+    "type": "object",
+    "properties": {
+      "ffmpeg_path": {
+        "type": "string",
+        "title": "FFmpeg Path",
+        "description": "Path to ffmpeg executable (optional, auto-detects bundled or system PATH)",
+        "default": ""
+      }
     }
   }
 }
