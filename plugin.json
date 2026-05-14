@@ -1,7 +1,7 @@
 {
   "id": "native-audio-support",
   "name": "Native Audio Support",
-  "version": "1.0.7",
+  "version": "1.0.9",
   "plugin_type": "format",
   "author": "Ting Reader Team",
   "description": "通过 FFmpeg 提供原生音频格式支持（元数据提取/写入与流式传输）。",
