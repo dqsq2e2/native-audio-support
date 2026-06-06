@@ -1,7 +1,7 @@
 {
   "id": "native-audio-support",
   "name": "Native Audio Support",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "plugin_type": "format",
   "author": "Ting Reader Team",
   "description": "通过 FFmpeg 提供原生音频格式支持（元数据提取/写入与流式传输）。",
@@ -19,13 +19,10 @@
     "aac"
   ],
   "dependencies": [
-    {
-      "plugin_name": "ffmpeg-utils",
-      "version_requirement": "*"
-    }
+    { "plugin_name": "ffmpeg-utils", "version_requirement": "*" }
   ],
   "license": "MIT",
-  "homepage": "https://github.com/dqsq2e2/native-audio-support",
+  "repo": "dqsq2e2/native-audio-support",
   "entry_point": "native_audio_support.dll",
   "config_schema": {
     "type": "object",
