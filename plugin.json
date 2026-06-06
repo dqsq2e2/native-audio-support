@@ -19,7 +19,10 @@
     "aac"
   ],
   "dependencies": [
-    { "plugin_name": "ffmpeg-utils", "version_requirement": "*" }
+    {
+      "plugin_name": "ffmpeg-utils",
+      "version_requirement": "*"
+    }
   ],
   "license": "MIT",
   "repo": "dqsq2e2/native-audio-support",
