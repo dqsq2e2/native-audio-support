@@ -153,7 +153,7 @@ jobs:
         env:
           TRPACK_SIGNING_KEY: ${{ secrets.TRPACK_SIGNING_KEY }}
         run: |
-                    if [[ "${{ runner.os }}" == "Windows" ]]; then
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
             TRPACK=".github/trpack/windows-x86_64/trpack.exe"
           else
             TRPACK=".github/trpack/linux-x86_64/trpack"
@@ -167,7 +167,9 @@ jobs:
             SIGN_ARGS=(--sign-key .trpack-signing-key.json)
           else
             echo "::warning::TRPACK_SIGNING_KEY secret is not set; building unsigned package"
-          fi          OUT="dist/native-audio-support-${{ needs.check-version.outputs.version }}-${{ matrix.platform_tag }}.tr"
+          fi
+
+          OUT="dist/native-audio-support-${{ needs.check-version.outputs.version }}-${{ matrix.platform_tag }}.tr"
           "$TRPACK" validate .
           "$TRPACK" build . --platform-tag "${{ matrix.platform_tag }}" --output "$OUT" "${SIGN_ARGS[@]}"
           "$TRPACK" verify "$OUT"
