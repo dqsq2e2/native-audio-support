@@ -161,17 +161,15 @@ jobs:
           fi
 
           mkdir -p dist
-          SIGN_ARGS=()
-          if [[ -n "${TRPACK_SIGNING_KEY:-}" ]]; then
-            printf '%s' "$TRPACK_SIGNING_KEY" > .trpack-signing-key.json
-            SIGN_ARGS=(--sign-key .trpack-signing-key.json)
-          else
-            echo "::warning::TRPACK_SIGNING_KEY secret is not set; building unsigned package"
+          if [[ -z "${TRPACK_SIGNING_KEY:-}" ]]; then
+            echo "::error::TRPACK_SIGNING_KEY secret is required for official plugin builds"
+            exit 1
           fi
+          printf '%s' "$TRPACK_SIGNING_KEY" > .trpack-signing-key.json
 
           OUT="dist/native-audio-support-${{ needs.check-version.outputs.version }}-${{ matrix.platform_tag }}.tr"
           "$TRPACK" validate .
-          "$TRPACK" build . --platform-tag "${{ matrix.platform_tag }}" --output "$OUT" "${SIGN_ARGS[@]}"
+          "$TRPACK" build . --platform-tag "${{ matrix.platform_tag }}" --output "$OUT" --sign-key .trpack-signing-key.json
           "$TRPACK" verify "$OUT"
 
       - name: Upload Artifact
