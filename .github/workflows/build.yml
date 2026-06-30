@@ -153,12 +153,7 @@ jobs:
         env:
           TRPACK_SIGNING_KEY: ${{ secrets.TRPACK_SIGNING_KEY }}
         run: |
-          if [[ -z "${TRPACK_SIGNING_KEY:-}" ]]; then
-            echo "TRPACK_SIGNING_KEY secret is required"
-            exit 1
-          fi
-
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
+                    if [[ "${{ runner.os }}" == "Windows" ]]; then
             TRPACK=".github/trpack/windows-x86_64/trpack.exe"
           else
             TRPACK=".github/trpack/linux-x86_64/trpack"
@@ -166,10 +161,15 @@ jobs:
           fi
 
           mkdir -p dist
-          printf '%s' "$TRPACK_SIGNING_KEY" > .trpack-signing-key.json
-          OUT="dist/native-audio-support-${{ needs.check-version.outputs.version }}-${{ matrix.platform_tag }}.tr"
+          SIGN_ARGS=()
+          if [[ -n "${TRPACK_SIGNING_KEY:-}" ]]; then
+            printf '%s' "$TRPACK_SIGNING_KEY" > .trpack-signing-key.json
+            SIGN_ARGS=(--sign-key .trpack-signing-key.json)
+          else
+            echo "::warning::TRPACK_SIGNING_KEY secret is not set; building unsigned package"
+          fi          OUT="dist/native-audio-support-${{ needs.check-version.outputs.version }}-${{ matrix.platform_tag }}.tr"
           "$TRPACK" validate .
-          "$TRPACK" build . --platform-tag "${{ matrix.platform_tag }}" --output "$OUT" --sign-key .trpack-signing-key.json
+          "$TRPACK" build . --platform-tag "${{ matrix.platform_tag }}" --output "$OUT" "${SIGN_ARGS[@]}"
           "$TRPACK" verify "$OUT"
 
       - name: Upload Artifact
