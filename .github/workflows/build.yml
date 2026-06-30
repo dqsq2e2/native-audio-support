@@ -3,105 +3,111 @@ name: Build Native Audio Support Plugin
 on:
   push:
     paths:
-      - 'Cargo.toml'
+      - "Cargo.toml"
+      - "plugin.yml"
+      - "src/**"
+      - ".github/workflows/build.yml"
+      - ".github/trpack/**"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   check-version:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.get_version.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
       should_release: ${{ steps.check_tag.outputs.exists == 'false' }}
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Get version from Cargo.toml
-        id: get_version
-        run: |
-          VERSION=$(grep '^version =' Cargo.toml | cut -d '"' -f 2)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Detected version: $VERSION"
+      - uses: actions/checkout@v5
 
-      - name: Check if tag exists
-        id: check_tag
+      - name: Get Version
+        id: version
+        shell: bash
         run: |
-          VERSION=${{ steps.get_version.outputs.version }}
-          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Tag v$VERSION already exists. Skipping release."
+          VERSION=$(grep '^version =' Cargo.toml | head -n 1 | cut -d '"' -f 2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check Tag
+        id: check_tag
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Tag v$VERSION does not exist. Proceeding with release."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-  update-plugin-json:
+  tag:
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Update plugin.json version
+      - uses: actions/checkout@v5
+
+      - name: Sync plugin.yml Version
+        shell: bash
         run: |
-          VERSION=${{ needs.check-version.outputs.version }}
-          jq --arg v "$VERSION" '.version = $v' plugin.json > plugin.json.tmp && mv plugin.json.tmp plugin.json
-          
-      - name: Commit and Push changes
-        id: auto_commit
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: Bump plugin.json version to ${{ needs.check-version.outputs.version }}"
-          file_pattern: 'plugin.json'
+          VERSION="${{ needs.check-version.outputs.version }}"
+          export VERSION
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("plugin.yml")
+          text = path.read_text(encoding="utf-8")
+          text = re.sub(r"^version:\s*.*$", f"version: {os.environ['VERSION']}", text, flags=re.M)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          if ! git diff --quiet -- plugin.yml; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add plugin.yml
+            git commit -m "chore: Bump plugin.yml version to $VERSION"
+            git push
+          fi
 
       - name: Create Tag
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const version = '${{ needs.check-version.outputs.version }}';
-            let sha = '${{ steps.auto_commit.outputs.commit_hash }}';
-            if (!sha) {
-              sha = context.sha;
-            }
-            github.rest.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: `refs/tags/v${version}`,
-              sha: sha
-            })
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          git tag "v$VERSION" "$(git rev-parse HEAD)"
+          git push origin "refs/tags/v$VERSION"
 
   build:
-    needs: [check-version, update-plugin-json]
+    needs: [check-version, tag]
     if: needs.check-version.outputs.should_release == 'true'
-    name: Build for ${{ matrix.os }}
+    name: Build ${{ matrix.platform_tag }}
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            platform_tag: windows-x86_64
             artifact_name: native_audio_support.dll
-            use_cross: false
-            zip_name: native-audio-support-windows-x86_64.zip
             entry_point: native_audio_support.dll
+            use_cross: false
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            platform_tag: linux-x86_64
             artifact_name: libnative_audio_support.so
-            use_cross: true
-            zip_name: native-audio-support-linux-x86_64.zip
             entry_point: libnative_audio_support.so
+            use_cross: false
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            platform_tag: linux-aarch64
             artifact_name: libnative_audio_support.so
-            use_cross: true
-            zip_name: native-audio-support-linux-aarch64.zip
             entry_point: libnative_audio_support.so
+            use_cross: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: v${{ needs.check-version.outputs.version }}
 
@@ -114,62 +120,78 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross
 
-      - name: Build Plugin DLL
+      - name: Build Native Library
         shell: bash
         run: |
-          if [ "${{ matrix.use_cross }}" == "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --target "${{ matrix.target }}"
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --release --target "${{ matrix.target }}"
+          fi
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "${{ matrix.entry_point }}"
+
+      - name: Prepare Manifest
+        shell: bash
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+          ENTRY_POINT: ${{ matrix.entry_point }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("plugin.yml")
+          text = path.read_text(encoding="utf-8")
+          text = re.sub(r"^version:\s*.*$", f"version: {os.environ['VERSION']}", text, flags=re.M)
+          text = re.sub(r"^entry_point:\s*.*$", f"entry_point: {os.environ['ENTRY_POINT']}", text, flags=re.M)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Package .tr
+        shell: bash
+        env:
+          TRPACK_SIGNING_KEY: ${{ secrets.TRPACK_SIGNING_KEY }}
+        run: |
+          if [[ -z "${TRPACK_SIGNING_KEY:-}" ]]; then
+            echo "TRPACK_SIGNING_KEY secret is required"
+            exit 1
           fi
 
-      - name: Package Plugin
-        shell: bash
-        run: |
-          mkdir -p package
-          cp plugin.json package/
-          
-          # Use jq to update the entry_point in plugin.json
-          jq --arg entry "${{ matrix.entry_point }}" '.entry_point = $entry' package/plugin.json > package/plugin.json.tmp && mv package/plugin.json.tmp package/plugin.json
-          
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} package/${{ matrix.entry_point }}
-            
-            # Create Zip
-            cd package
-            7z a ../${{ matrix.zip_name }} *
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            TRPACK=".github/trpack/windows-x86_64/trpack.exe"
           else
-            cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} package/${{ matrix.entry_point }}
-            
-            # Create Zip
-            cd package
-            zip -r ../${{ matrix.zip_name }} *
+            TRPACK=".github/trpack/linux-x86_64/trpack"
+            chmod +x "$TRPACK"
           fi
+
+          mkdir -p dist
+          printf '%s' "$TRPACK_SIGNING_KEY" > .trpack-signing-key.json
+          OUT="dist/native-audio-support-${{ needs.check-version.outputs.version }}-${{ matrix.platform_tag }}.tr"
+          "$TRPACK" validate .
+          "$TRPACK" build . --platform-tag "${{ matrix.platform_tag }}" --output "$OUT" --sign-key .trpack-signing-key.json
+          "$TRPACK" verify "$OUT"
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: ${{ matrix.zip_name }}
-          path: ${{ matrix.zip_name }}
+          name: native-audio-support-${{ matrix.platform_tag }}
+          path: dist/*.tr
           retention-days: 1
 
   release:
     needs: [check-version, build]
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
-          files: artifacts/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: artifacts/*.tr

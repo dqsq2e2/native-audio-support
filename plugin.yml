@@ -1,0 +1,41 @@
+id: native-audio-support
+name: Native Audio Support
+version: 1.1.1
+min_core_version: 1.4.8
+author: Ting Reader Team
+description:
+  zh: 通过 FFmpeg 提供原生音频格式支持（元数据提取/写入与流式传输）。
+  en: Native audio format support via FFmpeg (metadata extraction/writing and streaming).
+runtime: native
+dependencies:
+- plugin_name: ffmpeg-utils
+  version_requirement: '*'
+license: MIT
+repo: dqsq2e2/native-audio-support
+entry_point: native_audio_support.dll
+capabilities:
+- id: format.handler
+  kind: format_handler
+  invoke: get_stream_url
+  extensions:
+  - m4a
+  - mp4
+  - wma
+  - flac
+  - ape
+  - wav
+  - ogg
+  - opus
+  - aac
+config_schema:
+  type: object
+  properties:
+    ffmpeg_path:
+      type: string
+      title:
+        zh: FFmpeg 路径
+        en: FFmpeg Path
+      description:
+        zh: FFmpeg 可执行文件路径（可选，自动检测内置版本或系统 PATH）
+        en: Path to ffmpeg executable (optional, auto-detects bundled or system PATH)
+      default: ''

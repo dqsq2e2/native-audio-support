@@ -1,0 +1,6 @@
+/target
+/dist
+/*.dll
+/*.so
+/*.dylib
+/.trpack-signing-key.json
