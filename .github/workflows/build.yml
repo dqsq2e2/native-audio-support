@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "Cargo.toml"
+      - "Cross.toml"
       - "plugin.yml"
       - "src/**"
       - ".github/workflows/build.yml"
@@ -98,13 +99,15 @@ jobs:
             platform_tag: linux-x86_64
             artifact_name: libnative_audio_support.so
             entry_point: libnative_audio_support.so
-            use_cross: false
+            use_cross: true
+            max_glibc: "2.17"
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             platform_tag: linux-aarch64
             artifact_name: libnative_audio_support.so
             entry_point: libnative_audio_support.so
             use_cross: true
+            max_glibc: "2.28"
 
     steps:
       - uses: actions/checkout@v5
@@ -129,6 +132,45 @@ jobs:
             cargo build --release --target "${{ matrix.target }}"
           fi
           cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "${{ matrix.entry_point }}"
+
+      - name: Check glibc Compatibility
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+          MAX_GLIBC: ${{ matrix.max_glibc }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          target = os.environ["TARGET"]
+          artifact_name = os.environ["ARTIFACT_NAME"]
+          max_glibc = os.environ.get("MAX_GLIBC") or "2.28"
+          library = f"target/{target}/release/{artifact_name}"
+          output = subprocess.check_output(
+              ["readelf", "-V", library],
+              stderr=subprocess.STDOUT,
+              text=True,
+          )
+
+          versions = {
+              match.group(1)
+              for match in re.finditer(r"GLIBC_([0-9]+(?:\.[0-9]+)+)", output)
+          }
+
+          def parse(version):
+              return tuple(int(part) for part in version.split("."))
+
+          highest = max(versions, key=parse) if versions else "0.0"
+          print(f"highest GLIBC requirement: {highest}; allowed: {max_glibc}")
+          if parse(highest) > parse(max_glibc):
+              print(f"::error::{library} requires GLIBC_{highest}, above GLIBC_{max_glibc}")
+              sys.exit(1)
+          PY
 
       - name: Prepare Manifest
         shell: bash
